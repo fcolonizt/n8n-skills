@@ -1,0 +1,341 @@
+{
+  "name": "FARMACIA - Conciliación automática facturación v1",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Google Drive Trigger - Drogueria",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "fileCreated",
+        "folderToWatch": "=FARMACIA/01_DROGUERIAS_IN"
+      }
+    },
+    {
+      "id": "2",
+      "name": "Descargar Excel Drogueria",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [420, 300],
+      "parameters": {
+        "resource": "file",
+        "operation": "download",
+        "fileId": "={{$json.id}}",
+        "binaryPropertyName": "data"
+      }
+    },
+    {
+      "id": "3",
+      "name": "Leer Excel Drogueria",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [650, 300],
+      "parameters": {
+        "operation": "read",
+        "binaryPropertyName": "data",
+        "options": {
+          "headerRow": true
+        }
+      }
+    },
+    {
+      "id": "4",
+      "name": "Code - Normalizar Drogueria",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [890, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const staticData = this.getWorkflowStaticData('global');\n\nconst COL = {\n  proveedor: ['proveedor', 'laboratorio', 'drogueria', 'distribuidor'],\n  cuit: ['cuit', 'cuit_emisor', 'cuit_proveedor'],\n  nro_factura: ['nro_factura', 'factura', 'numero_factura', 'comprobante'],\n  fecha: ['fecha', 'fecha_factura', 'emision'],\n  importe_total: ['importe_total', 'total', 'monto_total', 'importe']\n};\n\nfunction getValue(row, aliases) {\n  for (const key of aliases) {\n    const found = Object.keys(row).find(k => k.toLowerCase().trim() === key.toLowerCase().trim());\n    if (found && row[found] !== undefined && row[found] !== null && row[found] !== '') return row[found];\n  }\n  return null;\n}\n\nfunction toDateYMD(value) {\n  if (!value) return null;\n  const str = String(value).trim();\n\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(str)) return str;\n\n  const ddmmyyyy = str.match(/^(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})$/);\n  if (ddmmyyyy) {\n    const dd = ddmmyyyy[1].padStart(2, '0');\n    const mm = ddmmyyyy[2].padStart(2, '0');\n    const yyyy = ddmmyyyy[3].length === 2 ? `20${ddmmyyyy[3]}` : ddmmyyyy[3];\n    return `${yyyy}-${mm}-${dd}`;\n  }\n\n  const jsDate = new Date(str);\n  if (!Number.isNaN(jsDate.getTime())) return jsDate.toISOString().slice(0, 10);\n\n  return null;\n}\n\nfunction toNumber(value) {\n  if (value === null || value === undefined || value === '') return 0;\n  if (typeof value === 'number') return value;\n\n  let str = String(value).trim().replace(/\\s/g, '');\n  const hasComma = str.includes(',');\n  const hasDot = str.includes('.');\n\n  if (hasComma && hasDot) {\n    str = str.replace(/\\./g, '').replace(',', '.');\n  } else if (hasComma && !hasDot) {\n    str = str.replace(',', '.');\n  }\n\n  const num = Number(str);\n  return Number.isFinite(num) ? num : 0;\n}\n\nconst normalized = $input.all().map((item) => {\n  const row = item.json;\n  const cuit = String(getValue(row, COL.cuit) ?? '').replace(/\\D/g, '');\n  const nroFactura = String(getValue(row, COL.nro_factura) ?? '').trim();\n  const fecha = toDateYMD(getValue(row, COL.fecha));\n  const importeTotal = toNumber(getValue(row, COL.importe_total));\n\n  return {\n    json: {\n      origen: 'drogueria',\n      sucursal_id: null,\n      proveedor: getValue(row, COL.proveedor) ?? null,\n      cuit,\n      nro_factura: nroFactura,\n      fecha,\n      importe_total: importeTotal,\n      match_key: `${cuit}|${nroFactura}|${fecha}`\n    }\n  };\n});\n\nstaticData.drogueria = normalized.map(i => i.json);\nreturn normalized;"
+      }
+    },
+    {
+      "id": "5",
+      "name": "Listar Excels Sucursales",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [420, 560],
+      "parameters": {
+        "resource": "fileFolder",
+        "operation": "search",
+        "filter": {
+          "folderId": "FARMACIA/02_SUCURSALES_IN",
+          "queryString": "mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='text/csv'"
+        }
+      }
+    },
+    {
+      "id": "6",
+      "name": "Split In Batches - Sucursales",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [650, 560],
+      "parameters": {
+        "batchSize": 1
+      }
+    },
+    {
+      "id": "7",
+      "name": "Code - Guardar archivo sucursal actual",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [890, 560],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "const staticData = this.getWorkflowStaticData('global');\nstaticData.currentSucursalFileName = $json.name || $json.fileName || '';\nreturn [{ json: $json }];"
+      }
+    },
+    {
+      "id": "8",
+      "name": "Descargar Excel Sucursal",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1120, 560],
+      "parameters": {
+        "resource": "file",
+        "operation": "download",
+        "fileId": "={{$json.id}}",
+        "binaryPropertyName": "data"
+      }
+    },
+    {
+      "id": "9",
+      "name": "Leer Excel Sucursal",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [1350, 560],
+      "parameters": {
+        "operation": "read",
+        "binaryPropertyName": "data",
+        "options": {
+          "headerRow": true
+        }
+      }
+    },
+    {
+      "id": "10",
+      "name": "Code - Normalizar Sucursal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 560],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const staticData = this.getWorkflowStaticData('global');\nconst fileName = staticData.currentSucursalFileName || '';\n\nconst COL = {\n  cuit: ['cuit', 'cuit_cliente', 'cuit_emisor', 'cliente_cuit'],\n  nro_factura: ['nro_factura', 'factura', 'numero_factura', 'comprobante'],\n  fecha: ['fecha', 'fecha_factura', 'emision'],\n  importe_total: ['importe_total', 'total', 'monto_total', 'importe']\n};\n\nfunction getValue(row, aliases) {\n  for (const key of aliases) {\n    const found = Object.keys(row).find(k => k.toLowerCase().trim() === key.toLowerCase().trim());\n    if (found && row[found] !== undefined && row[found] !== null && row[found] !== '') return row[found];\n  }\n  return null;\n}\n\nfunction toDateYMD(value) {\n  if (!value) return null;\n  const str = String(value).trim();\n\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(str)) return str;\n\n  const ddmmyyyy = str.match(/^(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})$/);\n  if (ddmmyyyy) {\n    const dd = ddmmyyyy[1].padStart(2, '0');\n    const mm = ddmmyyyy[2].padStart(2, '0');\n    const yyyy = ddmmyyyy[3].length === 2 ? `20${ddmmyyyy[3]}` : ddmmyyyy[3];\n    return `${yyyy}-${mm}-${dd}`;\n  }\n\n  const jsDate = new Date(str);\n  if (!Number.isNaN(jsDate.getTime())) return jsDate.toISOString().slice(0, 10);\n\n  return null;\n}\n\nfunction toNumber(value) {\n  if (value === null || value === undefined || value === '') return 0;\n  if (typeof value === 'number') return value;\n\n  let str = String(value).trim().replace(/\\s/g, '');\n  const hasComma = str.includes(',');\n  const hasDot = str.includes('.');\n\n  if (hasComma && hasDot) {\n    str = str.replace(/\\./g, '').replace(',', '.');\n  } else if (hasComma && !hasDot) {\n    str = str.replace(',', '.');\n  }\n\n  const num = Number(str);\n  return Number.isFinite(num) ? num : 0;\n}\n\nfunction extractSucursalId(name) {\n  const m = String(name || '').match(/sucursal[_\\- ]?(\\d{1,3})/i);\n  if (!m) return 'SIN_ID';\n  return m[1].padStart(2, '0');\n}\n\nconst sucursalId = extractSucursalId(fileName);\nconst normalized = $input.all().map((item) => {\n  const row = item.json;\n  const cuit = String(getValue(row, COL.cuit) ?? '').replace(/\\D/g, '');\n  const nroFactura = String(getValue(row, COL.nro_factura) ?? '').trim();\n  const fecha = toDateYMD(getValue(row, COL.fecha));\n  const importeTotal = toNumber(getValue(row, COL.importe_total));\n\n  return {\n    json: {\n      origen: 'sucursal',\n      sucursal_id: sucursalId,\n      proveedor: null,\n      cuit,\n      nro_factura: nroFactura,\n      fecha,\n      importe_total: importeTotal,\n      match_key: `${cuit}|${nroFactura}|${fecha}`\n    }\n  };\n});\n\nif (!Array.isArray(staticData.sucursales)) staticData.sucursales = [];\nfor (const row of normalized) staticData.sucursales.push(row.json);\n\nreturn normalized;"
+      }
+    },
+    {
+      "id": "11",
+      "name": "Code - Comparador/Conciliador",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [890, 860],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const staticData = this.getWorkflowStaticData('global');\nconst drogueria = Array.isArray(staticData.drogueria) ? staticData.drogueria : [];\nconst sucursales = Array.isArray(staticData.sucursales) ? staticData.sucursales : [];\n\nfunction round2(v) {\n  return Math.round((Number(v) + Number.EPSILON) * 100) / 100;\n}\n\nconst sucMap = new Map();\nfor (const s of sucursales) {\n  const key = s.match_key;\n  if (!sucMap.has(key)) sucMap.set(key, []);\n  sucMap.get(key).push(s);\n}\n\nconst droMap = new Map();\nfor (const d of drogueria) {\n  const key = d.match_key;\n  if (!droMap.has(key)) droMap.set(key, []);\n  droMap.get(key).push(d);\n}\n\nconst allKeys = new Set([...droMap.keys(), ...sucMap.keys()]);\nconst report = [];\n\nfor (const key of allKeys) {\n  const dRows = droMap.get(key) || [];\n  const sRows = sucMap.get(key) || [];\n\n  if (dRows.length === 0 && sRows.length > 0) {\n    for (const s of sRows) {\n      report.push({\n        estado: 'FALTA_EN_DROGUERIA',\n        match_key: key,\n        cuit: s.cuit,\n        nro_factura: s.nro_factura,\n        fecha: s.fecha,\n        importe_drogueria: null,\n        importe_sucursal: s.importe_total,\n        diferencia_importe: null,\n        proveedor: null,\n        sucursal_id: s.sucursal_id\n      });\n    }\n    continue;\n  }\n\n  if (dRows.length > 0 && sRows.length === 0) {\n    for (const d of dRows) {\n      report.push({\n        estado: 'FALTA_EN_SUCURSAL',\n        match_key: key,\n        cuit: d.cuit,\n        nro_factura: d.nro_factura,\n        fecha: d.fecha,\n        importe_drogueria: d.importe_total,\n        importe_sucursal: null,\n        diferencia_importe: null,\n        proveedor: d.proveedor || null,\n        sucursal_id: null\n      });\n    }\n    continue;\n  }\n\n  const sucIds = [...new Set(sRows.map(r => r.sucursal_id).filter(Boolean))];\n  if (sucIds.length > 1) {\n    for (const s of sRows) {\n      const d = dRows[0];\n      report.push({\n        estado: 'DUPLICADO_EN_SUCURSALES',\n        match_key: key,\n        cuit: s.cuit,\n        nro_factura: s.nro_factura,\n        fecha: s.fecha,\n        importe_drogueria: d?.importe_total ?? null,\n        importe_sucursal: s.importe_total,\n        diferencia_importe: d ? round2(s.importe_total - d.importe_total) : null,\n        proveedor: d?.proveedor || null,\n        sucursal_id: s.sucursal_id\n      });\n    }\n    continue;\n  }\n\n  const d = dRows[0];\n  const s = sRows[0];\n  const diff = round2((s.importe_total || 0) - (d.importe_total || 0));\n  const estado = Math.abs(diff) <= 0.01 ? 'OK' : 'DIFERENCIA_IMPORTE';\n\n  report.push({\n    estado,\n    match_key: key,\n    cuit: d.cuit || s.cuit,\n    nro_factura: d.nro_factura || s.nro_factura,\n    fecha: d.fecha || s.fecha,\n    importe_drogueria: d.importe_total,\n    importe_sucursal: s.importe_total,\n    diferencia_importe: diff,\n    proveedor: d.proveedor || null,\n    sucursal_id: s.sucursal_id || null\n  });\n}\n\nconst now = new Date();\nconst yyyy = now.getFullYear();\nconst mm = String(now.getMonth() + 1).padStart(2, '0');\nconst dd = String(now.getDate()).padStart(2, '0');\nconst hh = String(now.getHours()).padStart(2, '0');\nconst mi = String(now.getMinutes()).padStart(2, '0');\nconst fileName = `Reporte_Conciliacion_${yyyy}-${mm}-${dd}_${hh}${mi}.xlsx`;\n\nstaticData.reporteFileName = fileName;\nstaticData.drogueria = [];\nstaticData.sucursales = [];\n\nreturn report.map(r => ({ json: r }));"
+      }
+    },
+    {
+      "id": "12",
+      "name": "Spreadsheet File - Escribir Reporte",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 2,
+      "position": [1120, 860],
+      "parameters": {
+        "operation": "write",
+        "fileFormat": "xlsx",
+        "binaryPropertyName": "data"
+      }
+    },
+    {
+      "id": "13",
+      "name": "Code - Nombre de Archivo Reporte",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 860],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "language": "javaScript",
+        "jsCode": "const staticData = this.getWorkflowStaticData('global');\nconst fileName = staticData.reporteFileName || 'Reporte_Conciliacion.xlsx';\nreturn [{\n  json: { fileName },\n  binary: { data: $binary.data }\n}];"
+      }
+    },
+    {
+      "id": "14",
+      "name": "Subir Reporte a Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1580, 860],
+      "parameters": {
+        "resource": "file",
+        "operation": "upload",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "name": "={{$json.fileName}}",
+        "parents": [
+          "FARMACIA/03_REPORTES_OUT"
+        ]
+      }
+    }
+  ],
+  "connections": {
+    "Google Drive Trigger - Drogueria": {
+      "main": [
+        [
+          {
+            "node": "Descargar Excel Drogueria",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Listar Excels Sucursales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar Excel Drogueria": {
+      "main": [
+        [
+          {
+            "node": "Leer Excel Drogueria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Excel Drogueria": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalizar Drogueria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Listar Excels Sucursales": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches - Sucursales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches - Sucursales": {
+      "main": [
+        [
+          {
+            "node": "Code - Guardar archivo sucursal actual",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code - Comparador/Conciliador",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Guardar archivo sucursal actual": {
+      "main": [
+        [
+          {
+            "node": "Descargar Excel Sucursal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Descargar Excel Sucursal": {
+      "main": [
+        [
+          {
+            "node": "Leer Excel Sucursal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer Excel Sucursal": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalizar Sucursal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Normalizar Sucursal": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches - Sucursales",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Comparador/Conciliador": {
+      "main": [
+        [
+          {
+            "node": "Spreadsheet File - Escribir Reporte",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spreadsheet File - Escribir Reporte": {
+      "main": [
+        [
+          {
+            "node": "Code - Nombre de Archivo Reporte",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Nombre de Archivo Reporte": {
+      "main": [
+        [
+          {
+            "node": "Subir Reporte a Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
